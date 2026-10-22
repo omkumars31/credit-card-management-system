@@ -1,0 +1,34 @@
+# Maven
+target/
+!.mvn/wrapper/maven-wrapper.jar
+dependency-reduced-pom.xml
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+!.vscode/settings.json
+!.vscode/launch.json
+.classpath
+.project
+.settings/
+.factorypath
+*.swp
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+
+# Local databases
+data/
+*.mv.db
+*.trace.db
+*.lock.db
+
+# Logs and temp
+*.log
+logs/
+tmp/
+.DS_Store
+Thumbs.db
