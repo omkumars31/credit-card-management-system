@@ -142,6 +142,31 @@ class ApiSecurityIntegrationTest extends IntegrationTestBase {
     }
 
     @Test
+    void browserStyleFlowUsingTheRealCsrfEndpointWorksEndToEnd() throws Exception {
+        // exactly what the bundled web UI does: GET /api/auth/csrf, send the token header, repeat after login
+        MockHttpSession session = new MockHttpSession();
+        JsonNode first = read(mvc.perform(get("/api/auth/csrf").session(session)).andExpect(status().isOk()));
+        mvc.perform(post("/api/auth/login").session(session)
+                .header(first.get("headerName").asText(), first.get("token").asText())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json("userType", "ADMIN", "identifier", ADMIN_USER, "password", ADMIN_PASSWORD)))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.userType").value("ADMIN"));
+
+        JsonNode second = read(mvc.perform(get("/api/auth/csrf").session(session)).andExpect(status().isOk()));
+        String username = "ui-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+        mvc.perform(post("/api/admin/administrators").session(session)
+                .header(second.get("headerName").asText(), second.get("token").asText())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json("username", username, "fullName", "UI Admin", "password", "a-long-passphrase-1")))
+                .andExpect(status().isCreated());
+
+        mvc.perform(post("/api/admin/administrators").session(session).header("X-CSRF-TOKEN", "bogus-token")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json("username", username + "x", "fullName", "UI Admin", "password", "a-long-passphrase-1")))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
     void disabledCustomerCannotLogIn() throws Exception {
         String email = uniqueEmail("disabled");
         long id = register(email);

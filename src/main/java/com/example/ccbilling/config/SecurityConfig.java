@@ -5,6 +5,7 @@ import com.example.ccbilling.security.JsonAccessDeniedHandler;
 import com.example.ccbilling.security.JsonAuthenticationEntryPoint;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.ProviderManager;
@@ -22,7 +23,8 @@ import org.springframework.security.web.context.SecurityContextRepository;
  * Session-based security. Roles: ROLE_CUSTOMER and ROLE_ADMIN.
  * CSRF protection stays enabled (session-bound token, fetched from GET /api/auth/csrf and sent in the
  * X-CSRF-TOKEN header on every state-changing request). No CORS configuration is registered, so
- * cross-origin browser calls are not allowed by default.
+ * cross-origin browser calls are not allowed by default. The bundled single-page UI is served from the same
+ * origin (static resources), so it needs no CORS; a strict Content-Security-Policy is sent with every response.
  */
 @Configuration
 @EnableWebSecurity
@@ -60,7 +62,14 @@ public class SecurityConfig {
                         .deleteCookies("JSESSIONID")
                         .logoutSuccessHandler((request, response, authentication) ->
                                 response.setStatus(HttpStatus.NO_CONTENT.value())))
+                .headers(h -> h
+                        .contentSecurityPolicy(csp -> csp.policyDirectives(
+                                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+                                        + "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"))
+                        .frameOptions(f -> f.deny()))
                 .authorizeHttpRequests(a -> a
+                        // the bundled web UI (static files in src/main/resources/static) is public; all data is behind /api
+                        .requestMatchers(HttpMethod.GET, "/", "/index.html", "/css/**", "/js/**", "/favicon.ico").permitAll()
                         .requestMatchers("/api/health", "/api/auth/csrf", "/api/auth/login", "/api/auth/register",
                                 "/api/auth/logout").permitAll()
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")
