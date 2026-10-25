@@ -1,351 +1,422 @@
 # Credit Card Billing & Statement Management System
 
-A secure, session-authenticated **full-stack** credit card management and billing application: a REST backend built with **Java, Spring Boot, Spring Data JPA/Hibernate, Spring Security, Flyway, MySQL and H2**, plus a bundled **web UI** (plain HTML/CSS/JavaScript served by Spring Boot itself: no Node, no build step, no framework).
-It models a realistic financial backend for a portfolio: customers and administrators, card lifecycle, BIN-level billing rules, statement generation, finance charges, GST, late fees, simulated payments with idempotency, an append-only late-fee ledger and audit trail.
+![Java](https://img.shields.io/badge/Java-17%2B-orange)
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.3.5-6DB33F)
+![Spring Security](https://img.shields.io/badge/Spring%20Security-session%20%2B%20CSRF-6DB33F)
+![Flyway](https://img.shields.io/badge/Flyway-migrations-CC0200)
+![DB](https://img.shields.io/badge/DB-MySQL%20%7C%20H2-4479A1)
+![Tests](https://img.shields.io/badge/tests-148%20passing-brightgreen)
 
-> **Scope and honesty notes**
-> * All card data is **synthetic**. No card-network connectivity, no real payment gateway, and **no PCI DSS claim** of any kind.
-> * The application has not been production-certified, deployed or externally audited.
-> * See [Verification status](#verification-status) for exactly what was and was not executed before this ZIP was produced.
+A full-stack credit card billing platform: customers and administrators, card lifecycle, configurable BIN-level billing rules, statement generation with finance charges and GST, late fees, simulated payments with idempotency, and an append-only audit trail.
 
-## Contents
-0. [Web UI](#web-ui) · 1. [Features](#1-features) · 2. [Versions](#2-exact-technology-versions) · 3. [Prerequisites](#3-prerequisites) · 4. [Open in VS Code](#4-extract-and-open-in-vs-code) · 5. [Run with H2](#5-run-with-h2-no-mysql-needed) · 6. [Run with MySQL](#6-run-with-mysql) · 7. [Flyway](#7-how-flyway-migrations-work) · 8. [Initial admin](#8-initial-administrator) · 9. [Start / URL](#9-start-the-application) · 10. [Auth guide](#10-authentication-and-authorization) · 11. [API reference](#11-rest-api) · 12. [Business rules & formulas](#12-business-rules-formulas-and-assumptions) · 13. [Tests](#13-tests) · 14. [Build JAR](#14-build-the-executable-jar) · 15. [Troubleshooting](#15-troubleshooting) · 16. [GitHub](#16-push-to-github) · 17. [Design notes](#17-design-notes-and-limitations) · [Verification status](#verification-status)
+The backend is Spring Boot (Spring Data JPA/Hibernate, Spring Security, Flyway, MySQL/H2). The web UI is plain HTML/CSS/JavaScript served by the same Spring Boot process, so there is **no Node, no build step and no framework** to install.
 
----
+> **Scope:** educational portfolio project. All card data is synthetic, payments are simulated, and there is no card-network or payment-gateway integration. It is **not** PCI DSS compliant and has not been externally audited.
 
-## Web UI
-Start the application and open **http://localhost:8080**. One process serves both the UI and the API (same origin, so no CORS and the session cookie just works).
+## Screenshots
 
-| Role | What you can do |
+> Screenshots live in `docs/screenshots/`.
+
+| Sign in | Customer overview |
 |---|---|
-| **Customer** (register on the sign-in page) | Overview with card tiles and credit usage; card details with balance and transactions; statements with a full breakdown (previous balance, purchases, fees, finance charge, GST, credits, minimum due) and the billing-rule snapshot; **pay** a statement (minimum / full / custom amount) with an automatic `Idempotency-Key`; payment history; manage payment methods; late-fee ledger; profile |
-| **Administrator** (`admin` + the password printed in the console, or your `BOOTSTRAP_ADMIN_*`) | Overview and recent activity; customers (enable/disable); **BIN rules** (create/edit, rule versions); **cards** (issue, block/unblock/close, change limit); post **transactions** (purchase, fee, refund); **generate statements**; **assess late fees**; payments (reverse with a reason); late-fee ledger; **audit log** with filters; administrator accounts |
+| ![Sign in](docs/screenshots/01-signin.png) | ![Customer overview](docs/screenshots/02-customer-overview.png) |
 
-First-run walkthrough: register a customer → sign in as administrator → *Cards* → *Issue card* → open the card → *Post transaction* a few times → *Generate statement* (the period-end date defaults to the latest billing day, which must have passed) → sign in as the customer → *Statements* → *Pay*.
-
-Implementation notes: vanilla ES modules in `src/main/resources/static` (`js/api.js` handles the session cookie, the CSRF token with one automatic retry, and uniform errors; all data is inserted as text, never as HTML). A strict Content-Security-Policy (`script-src 'self'`, no inline scripts or styles, `frame-ancestors 'none'`) is sent with every response. The UI only hides what a role cannot use; **every rule is still enforced by the server**.
-
----
-
-## 1. Features
-* **Customers**: self-registration, profile, isolation (a customer can only ever see their own cards, entries, statements, payments, late fees).
-* **Administrators**: separate accounts and role; manage customers, BIN configurations, cards, billing entries, statements, late fees, payment reversals, audit log.
-* **Cards**: ACTIVE / BLOCKED / CLOSED lifecycle (CLOSED is terminal), credit limit, only a **masked** number is stored/returned (`411111******1234`); SHA-256 hash for uniqueness; full number is never persisted or logged.
-* **BIN configuration**: billing cycle day, due days, minimum-due rule, finance charge rate, GST rate, late-fee rule; validated (including cross-field conflicts) and versioned (`ruleVersion`).
-* **Billing**: simulated transaction feed (purchases, fees, refunds), statement generation per card/period with finance charge, GST, minimum due; duplicate-safe; historical statements keep a **snapshot of the rules** used.
-* **Payments**: simulated; partial/full; idempotent (`Idempotency-Key`); atomic with statement balance, allocation and audit; administrator reversal policy.
-* **Late-fee ledger**: append-only, one assessment per statement, stores the rule snapshot.
-* **Audit log**: append-only record of business and administrative operations (never passwords, session ids or full card numbers).
-* **Security**: Spring Security session login, delegating password encoder (BCrypt), CSRF protection, role checks at URL level **and** in services, session-fixation protection, hardened session cookie, JSON 401/403, no CORS by default.
-
-## 2. Exact technology versions
-| Component | Version |
+| Statement breakdown | Pay a statement |
 |---|---|
-| Java | 17 or newer (compiled with `release 17`) |
-| Build tool | Maven 3.6.3+ (3.9.x recommended) |
-| Spring Boot | **3.3.5** (parent POM) |
-| Spring Framework / Security / Data JPA | 6.1.x / 6.3.x / 3.3.x (managed by Boot 3.3.5) |
-| Hibernate ORM | 6.5.x (managed; 6.5.3.Final in Boot 3.3.5) |
-| Flyway (`flyway-core`, `flyway-mysql`) | 10.10.x (managed) |
-| H2 | 2.2.x (managed; 2.2.224 in Boot 3.3.5) |
-| MySQL server / Connector/J | MySQL 8.0+ / Connector/J 8.3.x (managed) |
-| JUnit Jupiter / Mockito | 5.10.x / 5.11.x (managed via `spring-boot-starter-test`) |
+| ![Statement breakdown](docs/screenshots/03-statement-breakdown.png) | ![Pay a statement](docs/screenshots/04-pay-statement.png) |
 
-Only Boot's dependency management is used (no hand-pinned versions). Run `mvn dependency:tree` to see the exact resolved patch versions. Dependencies: `starter-web`, `starter-data-jpa`, `starter-security`, `starter-validation` (Bean Validation for request DTOs), `flyway-core`, `flyway-mysql` (required by Flyway 10 for MySQL), `mysql-connector-j`, `h2`, `starter-test`, `spring-security-test`. No Lombok, JWT, MapStruct, Testcontainers, Actuator, Swagger or Docker. The UI is plain HTML/CSS/JavaScript with no framework, no package manager and no build step.
+| Admin overview | BIN billing rules |
+|---|---|
+| ![Admin overview](docs/screenshots/05-admin-overview.png) | ![BIN rules](docs/screenshots/06-bin-rules.png) |
 
-## 3. Prerequisites
-* JDK 17+ (`java -version`) and Maven 3.6.3+ (`mvn -version`). The project has no Maven wrapper, so Maven must be installed.
-* Optional: MySQL 8.x for the persistent profile.
-* VS Code with the **Extension Pack for Java** (optional but recommended).
+| Card management | Audit log |
+|---|---|
+| ![Card detail](docs/screenshots/07-card-detail.png) | ![Audit log](docs/screenshots/08-audit-log.png) |
 
-## 4. Extract and open in VS Code
-```bash
-unzip credit-card-billing-system.zip
-cd credit-card-billing-system
-code .
+## Table of contents
+- [Features](#features)
+- [Engineering highlights](#engineering-highlights)
+- [Tech stack](#tech-stack)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Using the web UI](#using-the-web-ui)
+- [Configuration](#configuration)
+- [Running with MySQL](#running-with-mysql)
+- [REST API](#rest-api)
+- [Billing rules and formulas](#billing-rules-and-formulas)
+- [Security model](#security-model)
+- [Testing](#testing)
+- [Project structure](#project-structure)
+- [Troubleshooting](#troubleshooting)
+- [Limitations and roadmap](#limitations-and-roadmap)
+- [Project status](#project-status)
+- [Author](#author)
+
+## Features
+
+**Customers**
+- Self-registration and sign-in, profile editing
+- Card overview with credit usage, per-card balance and transaction history
+- Statements with a full breakdown: previous balance, purchases, fees, finance charge, GST, credits, minimum due
+- Pay a statement (minimum, full or custom amount); retries can never double-charge
+- Manage saved payment methods, view payment history and late-fee ledger
+
+**Administrators**
+- Manage customers (enable/disable) and other administrator accounts
+- Create and edit **BIN billing rules** (cycle day, due days, minimum-due rule, finance charge, GST, late-fee rule), each change versioned
+- Issue cards; block, unblock or close them; change credit limits
+- Post simulated transactions (purchase, fee, refund) with credit-limit checks
+- Generate statements, assess late fees, reverse payments
+- Searchable, append-only audit log
+
+**Platform**
+- Session-based authentication, role-based authorization, CSRF protection
+- Flyway-managed schema, identical SQL on MySQL and H2
+- 40+ REST endpoints with validation, pagination and consistent error responses
+
+## Engineering highlights
+
+| Area | What was done |
+|---|---|
+| **Money correctness** | All amounts are `BigDecimal`, scale 2, `HALF_UP`, rounded once per derived amount. Formulas live in one framework-free class (`BillingCalculator`) with boundary tests. |
+| **Configurable rules + history** | Billing rules are stored per BIN and versioned. Each statement stores a **snapshot** of the rules it was generated with, so changing a BIN later never alters past statements or late-fee calculations. |
+| **Idempotent payments** | `Idempotency-Key` header plus a request fingerprint: same key and body returns the original payment; same key with a different body is rejected. A unique `(customer, key)` constraint is the database backstop. |
+| **Concurrency** | Pessimistic row locks serialize operations on a card (entries, statement generation) and on a statement (payments, reversals, late fees). Unique constraints back every duplicate-protection rule. |
+| **Atomicity** | Payment row, allocation row, statement balance and audit record commit or roll back together. |
+| **Append-only records** | Audit log, late-fee ledger and payment allocations have no update/delete methods, are `@Immutable` in Hibernate, and have MySQL triggers (plus optional grants) as a database-level guard. Reversals are new negative rows, never edits. |
+| **Security** | BCrypt (delegating encoder), session-fixation protection, CSRF tokens, HttpOnly + SameSite=Strict cookie, URL-level and service-level (`@PreAuthorize`) checks, customer isolation by session id (other customers' ids return 404), generic login errors, strict Content-Security-Policy, no inline scripts, UI renders API data as text only. |
+| **Sensitive data** | Full card numbers are never stored or logged: only a masked form, last 4 digits and a SHA-256 hash. Payment identifiers are stored masked. Passwords never appear in responses or audit records. |
+| **Schema discipline** | Flyway owns the schema; Hibernate runs with `ddl-auto=validate`. Foreign keys, unique and check constraints act as a second line of defence behind service validation. |
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Language | Java 17+ (developed and tested on JDK 21) |
+| Framework | Spring Boot 3.3.5, Spring MVC, Spring Data JPA (Hibernate 6.5), Spring Security 6.3, Bean Validation |
+| Database | MySQL 8 (persistent profile), H2 2.2 in MySQL mode (default, in-memory) |
+| Migrations | Flyway 10 |
+| Testing | JUnit 5, Mockito, Spring Boot Test / MockMvc |
+| Frontend | Vanilla JavaScript (ES modules), HTML, CSS, no build tooling |
+| Build | Maven 3.6.3+ |
+
+Dependencies are managed by the Spring Boot BOM. Run `mvn dependency:tree` for exact resolved versions.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    UI["Web UI<br/>(static HTML/CSS/JS)"] -->|"fetch + session cookie + CSRF header"| SEC
+    subgraph Spring Boot
+        SEC["Spring Security<br/>session, CSRF, roles, CSP"] --> CTRL["Controllers<br/>DTOs, validation"]
+        CTRL --> SVC["Services<br/>rules, transactions,<br/>authorization, audit"]
+        SVC --> CALC["BillingCalculator<br/>(pure Java)"]
+        SVC --> REPO["Spring Data repositories"]
+    end
+    REPO --> DB[("MySQL / H2<br/>Flyway-managed schema")]
 ```
-Windows PowerShell:
-```powershell
-Expand-Archive .\credit-card-billing-system.zip -DestinationPath .
-cd .\credit-card-billing-system
-code .
-```
-VS Code detects `pom.xml` and imports it as a Maven project. You can run `CcBillingApplication` from the editor ("Run" above `main`) or use the terminal commands below.
 
-## 5. Run with H2 (no MySQL needed)
-H2 is the **default profile** (`spring.profiles.active=h2`).
+Layers: **controllers** (thin, DTOs only) → **services** (business rules, transactions, authorization, auditing) → **repositories** → **entities**. Constructor injection throughout; JPA entities are never exposed in API responses.
+
+### Data model
+
+```mermaid
+erDiagram
+    CUSTOMERS ||--o{ CREDIT_CARDS : owns
+    BIN_CONFIGURATIONS ||--o{ CREDIT_CARDS : "rules for"
+    CREDIT_CARDS ||--o{ BILLING_ENTRIES : has
+    CREDIT_CARDS ||--o{ STATEMENTS : "billed by"
+    STATEMENTS ||--o{ BILLING_ENTRIES : includes
+    CUSTOMERS ||--o{ PAYMENT_METHODS : saves
+    CUSTOMERS ||--o{ PAYMENTS : makes
+    STATEMENTS ||--o{ PAYMENTS : "paid by"
+    PAYMENT_METHODS ||--o{ PAYMENTS : "used for"
+    PAYMENTS ||--o{ PAYMENT_ALLOCATIONS : "applied as"
+    STATEMENTS ||--o| LATE_FEE_LEDGER : "may have"
+```
+
+Also: `administrators` (separate login table) and `audit_logs` (append-only, references entities by type and id). 11 tables in total; see `src/main/resources/db/migration/V1__initial_schema.sql`.
+
+### Payment flow
+
+```mermaid
+sequenceDiagram
+    participant C as Customer UI
+    participant S as PaymentService
+    participant DB as Database
+    C->>S: POST /payments (Idempotency-Key, statementId, amount)
+    S->>DB: lock statement row (SELECT ... FOR UPDATE)
+    S->>DB: look up (customer, key)
+    alt key already used, same request
+        S-->>C: 200 original payment (no new charge)
+    else key already used, different request
+        S-->>C: 409 IDEMPOTENCY_KEY_REUSED
+    else new key
+        S->>DB: validate method, latest statement, amount <= outstanding
+        S->>DB: insert payment + allocation, update statement, insert audit (one transaction)
+        S-->>C: 201 payment
+    end
+```
+
+## Quick start
+
+**Prerequisites:** JDK 17 or newer and Maven 3.6.3+ (`java -version`, `mvn -version`). No database installation is needed for the default profile.
+
 ```bash
+git clone https://github.com/omkumars31/credit-card-management-system.git
+cd credit-card-management-system
+mvn clean test          # optional: runs all 148 tests
 mvn spring-boot:run
 ```
-* Database: in-memory H2 in MySQL compatibility mode (`jdbc:h2:mem:ccbilling;MODE=MySQL;DB_CLOSE_DELAY=-1`).
-* **Lifecycle**: all data (including users) is lost when the application stops; Flyway recreates the schema and seed data at every start.
-* To keep data between restarts use a file database (the `data/` folder is git-ignored):
-  * macOS/Linux: `H2_URL="jdbc:h2:file:./data/ccbilling;MODE=MySQL" mvn spring-boot:run`
-  * PowerShell: `$env:H2_URL="jdbc:h2:file:./data/ccbilling;MODE=MySQL"; mvn spring-boot:run`
-* The H2 web console is disabled.
 
-## 6. Run with MySQL
-1. Create a database and a dedicated user (choose your own password):
+Open **http://localhost:8080**.
+
+On first start the console prints a one-time administrator login:
+
+```
+ LOCAL DEV ONLY - generated one-time administrator credentials
+   username: admin
+   password: ...
+```
+
+Copy the password. Default storage is an in-memory H2 database, so **all data and the generated password reset on every restart**. To choose your own administrator credentials:
+
+```bash
+BOOTSTRAP_ADMIN_USERNAME=admin BOOTSTRAP_ADMIN_PASSWORD='a-long-passphrase-123' mvn spring-boot:run
+```
+
+PowerShell: `$env:BOOTSTRAP_ADMIN_USERNAME="admin"; $env:BOOTSTRAP_ADMIN_PASSWORD="a-long-passphrase-123"; mvn spring-boot:run`
+
+## Using the web UI
+
+1. On the sign-in page choose **Customer** and click *Create an account*, then sign out.
+2. Sign in on the **Administrator** tab with `admin` and the console password.
+3. **Cards → Issue card** for your customer, then open the card.
+4. **Post transaction** a few times (purchases, a refund).
+5. **Generate statement**. The period end defaults to the latest billing-cycle day, which must already have passed.
+6. Sign in as the customer: **Statements → Pay**. Try a partial payment, then view the breakdown.
+7. Back as admin: check **Audit log**, **Payments** (reversal) and **Late fees**. Late fees and finance charges need a due date to pass, so they appear in the automated tests (which control the clock) rather than a live demo.
+
+## Configuration
+
+Spring Boot does not read `.env` files; export variables in your shell or IDE run configuration. `.env.example` lists them all.
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `SPRING_PROFILES_ACTIVE` | `h2` or `mysql` | `h2` |
+| `SERVER_PORT` | HTTP port | `8080` |
+| `BOOTSTRAP_ADMIN_USERNAME` / `BOOTSTRAP_ADMIN_PASSWORD` | Initial administrator (password 12+ chars); created only if it does not exist | random one-time password on the H2 profile |
+| `H2_URL` | e.g. `jdbc:h2:file:./data/ccbilling;MODE=MySQL` to persist H2 data | in-memory |
+| `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` | MySQL connection (mysql profile) | local MySQL, user `ccbilling`, empty password |
+| `FLYWAY_LOCATIONS` | Set to `classpath:db/migration` to skip the MySQL-only triggers | both folders |
+| `SESSION_COOKIE_SECURE` | Set `true` when served over HTTPS | `false` |
+
+## Running with MySQL
+
 ```sql
 CREATE DATABASE ccbilling CHARACTER SET utf8mb4;
 CREATE USER 'ccbilling'@'localhost' IDENTIFIED BY '<your-local-password>';
 GRANT ALL PRIVILEGES ON ccbilling.* TO 'ccbilling'@'localhost';
 ```
-2. Export configuration (see `.env.example`; Spring Boot does **not** read `.env` files itself, so export the variables in your shell or IDE run configuration):
+
 ```bash
 export SPRING_PROFILES_ACTIVE=mysql
 export DB_USERNAME=ccbilling
 export DB_PASSWORD='<your-local-password>'
 export BOOTSTRAP_ADMIN_USERNAME=admin
-export BOOTSTRAP_ADMIN_PASSWORD='<a long passphrase, 12+ characters>'
+export BOOTSTRAP_ADMIN_PASSWORD='<12+ character passphrase>'
 mvn spring-boot:run
 ```
-PowerShell:
-```powershell
-$env:SPRING_PROFILES_ACTIVE="mysql"; $env:DB_USERNAME="ccbilling"; $env:DB_PASSWORD="<your-local-password>"
-$env:BOOTSTRAP_ADMIN_USERNAME="admin"; $env:BOOTSTRAP_ADMIN_PASSWORD="<a long passphrase, 12+ characters>"
-mvn spring-boot:run
-```
-3. Optional `DB_URL` overrides the default `jdbc:mysql://localhost:3306/ccbilling?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true` (those two flags are for **local development only**; use TLS in any real environment).
 
-**MySQL-only append-only triggers.** With the `mysql` profile Flyway also applies `db/migration-mysql/V100__append_only_triggers.sql`, which blocks UPDATE/DELETE on `audit_logs`, `late_fee_ledger` and `payment_allocations`. This needs the `TRIGGER` privilege and, when binary logging is on, `SUPER` or `log_bin_trust_function_creators=1`. To skip it: `FLYWAY_LOCATIONS=classpath:db/migration`.
+With the `mysql` profile Flyway also applies `db/migration-mysql/V100__append_only_triggers.sql` (blocks UPDATE/DELETE on `audit_logs`, `late_fee_ledger`, `payment_allocations`). It needs the `TRIGGER` privilege and, with binary logging enabled, `SUPER` or `log_bin_trust_function_creators=1`; skip it with `FLYWAY_LOCATIONS=classpath:db/migration`. The default `DB_URL` uses `useSSL=false` and `allowPublicKeyRetrieval=true`, which are for local development only.
 
-**Optional database-permission hardening (MySQL).** Run the application once with the privileged user so Flyway can migrate, then run it with a restricted runtime user and `SPRING_FLYWAY_ENABLED=false`:
-```sql
-CREATE USER 'ccbilling_app'@'localhost' IDENTIFIED BY '<runtime-password>';
-GRANT SELECT, INSERT, UPDATE, DELETE ON ccbilling.customers TO 'ccbilling_app'@'localhost';
--- repeat for: administrators, bin_configurations, credit_cards, statements, billing_entries, payment_methods, payments
-GRANT SELECT, INSERT ON ccbilling.audit_logs TO 'ccbilling_app'@'localhost';
-GRANT SELECT, INSERT ON ccbilling.late_fee_ledger TO 'ccbilling_app'@'localhost';
-GRANT SELECT, INSERT ON ccbilling.payment_allocations TO 'ccbilling_app'@'localhost';
-```
-(`billing_entries` needs UPDATE because `statement_id` is set when an entry is billed.)
+> The MySQL profile and its triggers have not been exercised yet (see [Project status](#project-status)).
 
-## 7. How Flyway migrations work
-* Flyway owns the schema. Hibernate runs with `ddl-auto=validate`: it only checks that the entity mappings match the migrated schema and never changes it.
-* `src/main/resources/db/migration`: `V1__initial_schema.sql` (all tables, constraints, indexes), `V2__seed_bin_configurations.sql` (two synthetic BINs: `411111`, `520000`).
-* `src/main/resources/db/migration-mysql`: MySQL-only `V100__append_only_triggers.sql` (kept in a **sibling** folder because Flyway scans sub-folders recursively).
-* The same SQL runs on MySQL and on H2 (MODE=MySQL). Applied migrations are recorded in `flyway_schema_history`. **Never edit an applied migration**; add a new `V3__...sql` instead.
+## REST API
 
-## 8. Initial administrator
-There is no default password. On startup `AdminBootstrap` creates an administrator **only if it does not exist yet**, from environment variables:
+All endpoints return JSON. Lists are paginated (`?page=0&size=20&sort=field,desc`, max size 100). Errors have the shape `{timestamp, status, code, message, path, fieldErrors?}`. Money values are numbers with 2 decimals (INR); dates are ISO-8601 (UTC).
 
-| Variable | Meaning |
+**Public:** `GET /api/health`, `GET /api/auth/csrf`, `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`
+
+**Customer** (`/api/customers/me/...`, role `CUSTOMER`):
+
+| Endpoint | Description |
 |---|---|
-| `BOOTSTRAP_ADMIN_USERNAME` | admin login name |
-| `BOOTSTRAP_ADMIN_PASSWORD` | at least 12 characters (startup fails otherwise) |
-| `BOOTSTRAP_ADMIN_FULL_NAME` | optional display name |
+| `GET`, `PUT /api/customers/me` | Profile |
+| `GET .../cards`, `.../cards/{id}`, `.../cards/{id}/balance`, `.../cards/{id}/entries` | Own cards, balance, transactions |
+| `GET .../statements`, `.../statements/{id}` | Own statements |
+| `POST .../payments` (header `Idempotency-Key`), `GET .../payments`, `.../payments/{id}` | Pay and list payments |
+| `GET`, `POST .../payment-methods`, `DELETE .../payment-methods/{id}` | Saved methods (deactivate) |
+| `GET .../late-fees` | Late-fee ledger |
 
-Local-development convenience (H2 profile only): if none are set and no administrator exists, a random 20-character password is generated and printed **once** in the console banner (`username: admin`). With the `mysql` profile nothing is generated; if no variables are set no administrator is created. More administrators can be created via `POST /api/admin/administrators`.
+**Administrator** (`/api/admin/...`, role `ADMIN`):
 
-## 9. Start the application
-```bash
-mvn spring-boot:run
+| Endpoint | Description |
+|---|---|
+| `/administrators` (POST, GET), `/administrators/{id}/enabled` (PATCH) | Admin accounts |
+| `/customers`, `/customers/{id}`, `/customers/{id}/status` | Customers |
+| `/bin-configurations` (POST, GET), `/bin-configurations/{id}` (GET, PUT) | Billing rules |
+| `/cards` (POST, GET), `/cards/{id}`, `/cards/{id}/status`, `/cards/{id}/credit-limit`, `/cards/{id}/balance` | Card lifecycle |
+| `/cards/{id}/entries` (POST, GET) | Post and list transactions |
+| `/statements/generate`, `/statements`, `/statements/{id}` | Statements |
+| `/statements/{id}/late-fee` (POST), `/late-fees` (GET) | Late fees and ledger |
+| `/payments` (GET), `/payments/{id}/reverse` (POST) | Payments and reversal |
+| `/audit-logs` | Filter by action, entity, actor, time range |
+
+Status codes: `201` created, `204` logout, `400` validation, `401` unauthenticated, `403` forbidden or CSRF, `404` not found (including other customers' ids), `409` conflict or duplicate, `422` business-rule violation (e.g. `CREDIT_LIMIT_EXCEEDED`, `PAYMENT_EXCEEDS_OUTSTANDING`).
+
+<details>
+<summary><b>Example: generate a statement</b></summary>
+
+`POST /api/admin/statements/generate` with `{"cardId": 1, "periodEnd": "2026-03-15"}`:
+
+```json
+{
+  "id": 1, "cardId": 1, "maskedCardNumber": "412345******8812",
+  "periodStart": "2026-02-16", "periodEnd": "2026-03-15", "dueDate": "2026-04-04",
+  "previousBalance": 0.00, "purchasesTotal": 12500.50, "creditsTotal": 500.50, "feesTotal": 0.00,
+  "financeCharge": 0.00, "gstOnFinanceCharge": 0.00,
+  "totalAmountDue": 12000.00, "minimumAmountDue": 600.00,
+  "paidAmount": 0.00, "outstandingAmount": 12000.00,
+  "paymentStatus": "UNPAID", "ruleVersion": 1, "rulesApplied": { "...": "snapshot of the BIN rules" }
+}
 ```
-* URL: **http://localhost:8080** opens the web UI (change the port with `SERVER_PORT`). Health: `GET http://localhost:8080/api/health`.
-* Customers can register in the UI or at `POST /api/auth/register`. See [Web UI](#web-ui).
+Repeating the call returns `409 STATEMENT_ALREADY_EXISTS` and creates no charges.
+</details>
 
-## 10. Authentication and authorization
-* **Session-based** (`JSESSIONID` cookie: HttpOnly, SameSite=Strict, `Secure` when `SESSION_COOKIE_SECURE=true`, 30 min timeout). No JWT, no OAuth.
-* Two user types log in at the same endpoint with `userType` = `CUSTOMER` (identifier = email) or `ADMIN` (identifier = username).
-* **CSRF protection is on.** Every state-changing request (`POST/PUT/PATCH/DELETE`, including login and register) needs the token from `GET /api/auth/csrf`, sent in the `X-CSRF-TOKEN` header, together with the session cookie. Get a fresh token after logging in.
-* Roles: `/api/admin/**` requires `ROLE_ADMIN`; `/api/customers/me/**` requires `ROLE_CUSTOMER`; admin services additionally carry `@PreAuthorize("hasRole('ADMIN')")`. Customer data is always looked up by the customer id from the session (never from the URL), so another customer's ids return `404`.
-* Failed logins return the same generic `401 INVALID_CREDENTIALS` for unknown users and wrong passwords. Logout: `POST /api/auth/logout` → `204`. CORS: not configured, so cross-origin browser calls are blocked.
+<details>
+<summary><b>Example: call the API with curl (CSRF + session)</b></summary>
 
-**bash (curl) session helper**
 ```bash
 BASE=http://localhost:8080; JAR=$(mktemp)
 csrf() { curl -s -b "$JAR" -c "$JAR" $BASE/api/auth/csrf | sed -E 's/.*"token":"([^"]+)".*/\1/'; }
 api()  { curl -s -b "$JAR" -c "$JAR" -H "X-CSRF-TOKEN: $(csrf)" -H 'Content-Type: application/json' "$@"; }
 
-api -X POST $BASE/api/auth/register -d '{"fullName":"Asha Rao","email":"asha@example.com","phone":"+919876543210","password":"Sup3rSecretPass"}'
-api -X POST $BASE/api/auth/login    -d '{"userType":"CUSTOMER","identifier":"asha@example.com","password":"Sup3rSecretPass"}'
-api $BASE/api/auth/me
-api -X POST $BASE/api/auth/logout
+api -X POST $BASE/api/auth/login -d '{"userType":"ADMIN","identifier":"admin","password":"<console password>"}'
+api $BASE/api/admin/bin-configurations
 ```
-**PowerShell**
-```powershell
-$base = "http://localhost:8080"
-$csrf = Invoke-RestMethod "$base/api/auth/csrf" -SessionVariable s
-$h = @{ $csrf.headerName = $csrf.token }
-Invoke-RestMethod "$base/api/auth/login" -Method Post -WebSession $s -Headers $h -ContentType "application/json" `
-  -Body '{"userType":"ADMIN","identifier":"admin","password":"<your admin password>"}'
-$csrf = Invoke-RestMethod "$base/api/auth/csrf" -WebSession $s; $h = @{ $csrf.headerName = $csrf.token }
-Invoke-RestMethod "$base/api/admin/customers" -WebSession $s
+</details>
+
+## Billing rules and formulas
+
+Currency is INR. Rounding is `HALF_UP` at 2 decimals. Business "today" is the UTC date.
+
 ```
-Use separate cookie jars for an administrator and a customer when following the workflow below.
-
-## 11. REST API
-Errors always look like `{"timestamp","status","code","message","path","fieldErrors"?}`. Lists are paginated: `?page=0&size=20&sort=field,desc` (max size 100) and return `{"content":[…],"page","size","totalElements","totalPages"}`. Money is a JSON number with 2 decimals (INR); dates are ISO-8601 (UTC).
-
-### Public
-| Method & path | Description |
-|---|---|
-| `GET /api/health` | `{"status":"UP"}` |
-| `GET /api/auth/csrf` | `{"headerName":"X-CSRF-TOKEN","parameterName":"_csrf","token":"…"}` |
-| `POST /api/auth/register` | create customer (`201`, `409` duplicate email, `400` validation) |
-| `POST /api/auth/login` | session login (`200`, generic `401`) |
-| `POST /api/auth/logout` | `204` |
-| `GET /api/auth/me` | current user (authenticated) |
-
-### Customer (`/api/customers/me`)
-| Method & path | Description |
-|---|---|
-| `GET` / `PUT` `/api/customers/me` | profile (`fullName`, `phone`) |
-| `GET …/cards`, `GET …/cards/{id}`, `GET …/cards/{id}/balance` | own cards; balance/exposure |
-| `GET …/cards/{id}/entries` | own transactions (paged) |
-| `GET …/statements?cardId=&status=`, `GET …/statements/{id}` | own statements (the "bills") |
-| `POST …/payments` (header `Idempotency-Key`) | pay a statement (`201`; replay → `200` + `Idempotent-Replay: true`) |
-| `GET …/payments?statementId=&status=`, `GET …/payments/{id}` | own payments |
-| `GET/POST …/payment-methods`, `DELETE …/payment-methods/{id}` | simulated instruments (identifier stored masked; DELETE = deactivate) |
-| `GET …/late-fees` | own late-fee ledger rows |
-
-### Administrator (`/api/admin`)
-| Method & path | Description |
-|---|---|
-| `POST/GET /administrators`, `PATCH /administrators/{id}/enabled` | administrator accounts (cannot disable yourself) |
-| `GET /customers?email=&status=`, `GET /customers/{id}`, `PATCH /customers/{id}/status` | customers |
-| `POST/GET /bin-configurations`, `GET/PUT /bin-configurations/{id}` | BIN billing rules |
-| `POST /cards`, `GET /cards?customerId=&status=`, `GET /cards/{id}`, `PATCH /cards/{id}/status`, `PUT /cards/{id}/credit-limit`, `GET /cards/{id}/balance` | card lifecycle |
-| `POST/GET /cards/{id}/entries` | post/list purchases, fees, refunds |
-| `POST /statements/generate`, `GET /statements?cardId=&status=`, `GET /statements/{id}` | statements |
-| `POST /statements/{id}/late-fee`, `GET /late-fees?statementId=&cardId=` | late-fee assessment and ledger |
-| `GET /payments?customerId=&statementId=&status=`, `POST /payments/{id}/reverse` | payments |
-| `GET /audit-logs?action=&entityType=&entityId=&actorType=&actorId=&from=&to=` | audit trail (`from`/`to` ISO date-time) |
-
-Status codes: `201` created, `200` ok, `204` logout, `400` validation/malformed, `401` unauthenticated/bad credentials, `403` forbidden/CSRF, `404` not found (also for other customers' ids), `409` duplicate/conflict, `422` business-rule violation (e.g. `CREDIT_LIMIT_EXCEEDED`, `PAYMENT_EXCEEDS_OUTSTANDING`).
-
-### Example workflow (JSON)
-**1. Admin creates a BIN configuration** `POST /api/admin/bin-configurations`
-```json
-{"binCode":"412345","name":"Gold","billingCycleDay":15,"paymentDueDays":20,
- "minDuePercentage":5,"minDueFloor":200,"financeChargeMonthlyRate":3.5,"gstRate":18,
- "lateFeePercentage":10,"lateFeeFloor":100,"lateFeeCap":1000,"lateFeeThreshold":500}
-```
-→ `201` `{"id":3,"binCode":"412345","name":"Gold","rules":{…same values…},"ruleVersion":1,…}`
-
-**2. Admin issues a card** `POST /api/admin/cards` `{"customerId":1,"binConfigurationId":3,"creditLimit":100000.00}`
-→ `201` `{"id":1,"customerId":1,"binConfigurationId":3,"binCode":"412345","maskedNumber":"412345******8812","creditLimit":100000.00,"status":"ACTIVE","expiresOn":"2031-10-31",…}`
-
-**3. Admin posts transactions** `POST /api/admin/cards/1/entries`
-`{"entryType":"PURCHASE","amount":10000.00,"description":"Electronics","transactionDate":"2026-02-20","referenceId":"p1"}` (`entryType`: `PURCHASE|FEE|REFUND`; `referenceId` makes the call idempotent per card)
-
-**4. Admin generates the statement** `POST /api/admin/statements/generate` `{"cardId":1,"periodEnd":"2026-03-15"}`
-→ `201`
-```json
-{"id":1,"cardId":1,"maskedCardNumber":"412345******8812","periodStart":"2026-02-16","periodEnd":"2026-03-15",
- "dueDate":"2026-04-04","previousBalance":0.00,"purchasesTotal":12500.50,"creditsTotal":500.50,"feesTotal":0.00,
- "financeCharge":0.00,"gstOnFinanceCharge":0.00,"totalAmountDue":12000.00,"minimumAmountDue":600.00,
- "paidAmount":0.00,"outstandingAmount":12000.00,"paymentStatus":"UNPAID","ruleVersion":1,"rulesApplied":{…}}
-```
-Repeating the call returns `409 STATEMENT_ALREADY_EXISTS`.
-
-**5. Customer adds a payment method and pays** `POST /api/customers/me/payment-methods`
-`{"type":"UPI","displayName":"My UPI","identifier":"asha@okbank"}` → `{"id":1,…,"maskedIdentifier":"********bank","active":true}`
-
-`POST /api/customers/me/payments` with header `Idempotency-Key: pay-2026-03-0001` and body `{"statementId":1,"paymentMethodId":1,"amount":300.00}`
-→ `201` `{"id":1,"statementId":1,"paymentMethodId":1,"amount":300.00,"status":"COMPLETED",…}`; the statement becomes `PARTIALLY_PAID`, outstanding `11700.00`. Same key + same body → `200` with the same payment; same key + different body → `409 IDEMPOTENCY_KEY_REUSED`.
-
-**6. Late fee** (after the due date) `POST /api/admin/statements/1/late-fee`
-→ `201` `{"feeAmount":100.00,"gstRate":18.0000,"gstAmount":18.00,"totalAmount":118.00,"unpaidMinimumDue":300.00,"ruleVersion":1,"ruleSnapshot":"ruleVersion=1;cycleDay=15;…","status":"POSTED",…}`
-
-**7. Next statement** (`periodEnd` 2026-04-15) carries `previousBalance` 11700.00, `financeCharge` 409.50, `gstOnFinanceCharge` 73.71, the late fee in `feesTotal` (118.00), +1000.00 purchases → `totalAmountDue` **13301.21**, `minimumAmountDue` **665.06**.
-
-**8. Reversal** `POST /api/admin/payments/{id}/reverse` `{"reason":"Bounced"}` → payment `REVERSED`, statement balance restored.
-
-## 12. Business rules, formulas and assumptions
-**Currency/rounding.** INR; all money is `BigDecimal`, scale 2, `HALF_UP`, rounded once per derived amount; percentages have up to 4 decimals. Business "today" is the **UTC** date.
-
-**Formulas** (implemented in `BillingCalculator`, unit-tested at the boundaries):
-```
-financeCharge      = round2( max(0, previousBalance) × financeChargeMonthlyRate / 100 )
+financeCharge      = round2( max(0, previousBalance) × monthlyRate / 100 )
 gstOnFinanceCharge = round2( financeCharge × gstRate / 100 )
 totalAmountDue     = previousBalance + purchases + fees + financeCharge + gstOnFinanceCharge − credits
-minimumAmountDue   = 0                                    if totalAmountDue ≤ 0
-                   = totalAmountDue                       if totalAmountDue ≤ minDueFloor
-                   = min(totalAmountDue, max(minDueFloor, round2(total × minDuePercentage / 100)))   otherwise
-lateFee            = 0                                    if unpaidMinimumDue ≤ 0 or totalAmountDue < lateFeeThreshold
-                   = min(lateFeeCap, max(lateFeeFloor, round2(unpaidMinimumDue × lateFeePercentage / 100)))
-gstOnLateFee       = round2( lateFee × gstRate / 100 ),  late fee posted to the card = lateFee + gstOnLateFee
+minimumAmountDue   = 0                                  if totalAmountDue ≤ 0
+                   = totalAmountDue                     if totalAmountDue ≤ minDueFloor
+                   = min(total, max(minDueFloor, round2(total × minDuePct / 100)))   otherwise
+lateFee            = 0                                  if unpaidMinimumDue ≤ 0 or total < lateFeeThreshold
+                   = min(cap, max(floor, round2(unpaidMinimumDue × lateFeePct / 100)))
+lateFee posted     = lateFee + round2(lateFee × gstRate / 100)
 ```
-**Assumptions** (not specified in the brief):
-* **Billing period.** A BIN closes the period on `billingCycleDay` (1–28, so every month has it). `periodEnd` must be that day, not in the future, after the latest existing statement of the card, and not before the card was opened. `periodStart` = day after the previous statement's end (first statement: one month earlier + 1 day). Due date = `periodEnd + paymentDueDays` (≤ 27 so it precedes the next statement).
-* **Eligible entries.** All unbilled entries with `transactionDate ≤ periodEnd` (so late-posted items are not lost). They are marked with the statement id.
-* **Cumulative statements.** `previousBalance` is the outstanding amount (total − payments) of the previous statement at generation time, so finance charge applies to what is still unpaid (compounding on earlier charges). A credit balance (negative total) is carried forward and earns no finance charge.
-* **Payments** apply only to the card's **latest** statement, must not exceed its outstanding amount (no overpayment/credit handling), and are completed immediately (simulated).
-* **Late fee** is assessed on request by an administrator (no scheduler) once `today > dueDate` and the net payments completed **on or before** the due date (reversed payments excluded) are below the minimum due. It uses the **statement's rule snapshot**, not the current BIN rules. No waiver endpoint; a waiver would be a new offsetting ledger row (not implemented).
-* **Reversal policy.** Administrator only, once per payment, only while its statement is still the latest; creates a negative allocation row and restores the balance. Late fees already assessed are not reversed automatically.
-* **Credit limit** check applies to purchases: `amount ≤ limit − max(0, latestStatementOutstanding + unbilledNet)`. Blocked cards accept fees/refunds, not purchases; closed cards accept nothing; a card can be closed only with zero outstanding and unbilled balance.
-* **BIN rules** can change at any time (`ruleVersion` increments only when a value changes); existing statements are never recalculated. The BIN code is immutable.
 
-## 13. Tests
+**Worked example** (rules: 5% minimum due with 200 floor, 3.5% monthly finance charge, 18% GST, late fee 10% within 100–1000): statement 1 totals ₹12,000.00 with minimum due ₹600.00. The customer pays ₹300 by the due date, which is less than the minimum, so a late fee of ₹100.00 + ₹18.00 GST = ₹118.00 is assessed. Statement 2 then carries ₹11,700.00, adds a ₹409.50 finance charge, ₹73.71 GST on it, the ₹118.00 late fee and ₹1,000.00 of new purchases: total **₹13,301.21**, minimum due **₹665.06**. This exact scenario is an automated test.
+
+**Design decisions and assumptions**
+- **Billing period:** closes on the BIN's `billingCycleDay` (1–28). `periodEnd` must be that day, not in the future, later than the card's latest statement, and not before the card was opened. Due date is `periodEnd + paymentDueDays` (at most 27).
+- **Cumulative statements:** the previous statement's outstanding amount is carried forward; finance charge applies to that unpaid amount. A credit balance is carried forward and earns no finance charge.
+- **Payments:** only against the card's latest statement; cannot exceed the outstanding amount; completed immediately (simulated).
+- **Late fee:** assessed by an administrator (no scheduler) once the due date has passed and net on-time payments are below the minimum due; uses the statement's rule snapshot; at most one per statement.
+- **Reversal:** administrator only, once per payment, only while its statement is still the card's latest. Creates a negative allocation row and restores the balance.
+- **Cards:** purchases are limited by available credit; blocked cards accept fees and refunds only; a card can be closed only with no outstanding or unbilled balance; closed is terminal.
+
+## Security model
+
+- Session login (`JSESSIONID`: HttpOnly, SameSite=Strict, `Secure` when enabled). No JWT or third-party identity provider.
+- **CSRF is enabled.** Every `POST/PUT/PATCH/DELETE` needs the token from `GET /api/auth/csrf` in the `X-CSRF-TOKEN` header. The bundled UI does this automatically and retries once if the token is stale.
+- `/api/admin/**` requires `ROLE_ADMIN`; `/api/customers/me/**` requires `ROLE_CUSTOMER`; admin services also carry `@PreAuthorize`.
+- Customers are always identified by their session, never by an id in the URL, so another customer's ids return `404`.
+- Failed logins return the same generic `401` for unknown users and wrong passwords, and the attempted identifier is not logged.
+- CORS is not enabled (the UI is same-origin). A strict Content-Security-Policy forbids inline scripts and framing.
+
+## Testing
+
 ```bash
-mvn test            # unit + integration tests (JUnit 5, Mockito, Spring Boot Test on H2)
-mvn -Dtest=BillingCalculatorTest test
-mvn verify          # tests + packaging
+mvn test                              # all tests
+mvn -Dtest=BillingCalculatorTest test # a single class
 ```
-Test inventory (148 `@Test` methods):
-* `billing` (33): formulas and boundaries, rule validation, Luhn/masking/hash, card transitions (pure Java).
-* `service` + `config` (79): Mockito tests for payments (partial/full, idempotent replay, key reuse, ownership, supersession, reversal), statements (first/second statement figures, duplicates, ordering, rule snapshot), late fees, billing entries, cards, BIN configuration, customers/administrators, bootstrap.
-* `integration` (36): `ApiSecurityIntegrationTest` (401/403/CSRF, the real browser-style CSRF token flow, role separation, generic login failures, logout, disabled users, service-layer `@PreAuthorize`), `StaticFrontendIntegrationTest` (UI is public, API stays protected, CSP header), `PersistenceIntegrationTest` (Flyway, unique/FK/check constraints, queries, immutability), `BillingWorkflowIntegrationTest` (full lifecycle through MockMvc with exact expected amounts).
 
-All tests run offline on in-memory H2 with a controllable clock; no payment gateway or external service is needed. **H2 is not MySQL**: collation/case-sensitivity, lock timeouts and trigger support differ; the MySQL append-only triggers are therefore not exercised by the suite.
+**148 tests**, all running offline on in-memory H2 with a controllable clock:
 
-## 14. Build the executable JAR
-```bash
-mvn clean package            # add -DskipTests to skip tests
-java -jar target/credit-card-billing-system-1.0.0.jar
-SPRING_PROFILES_ACTIVE=mysql java -jar target/credit-card-billing-system-1.0.0.jar
+| Group | Count | Covers |
+|---|---|---|
+| Billing logic | 33 | Formulas and boundaries, rule validation, Luhn, masking, hashing, card state transitions |
+| Services and config (Mockito) | 79 | Payments (partial/full, idempotent replay, key reuse, ownership, supersession, reversal), statements, late fees, entries, cards, BIN rules, customers/admins, bootstrap |
+| Integration (Spring Boot, MockMvc, H2) | 36 | Security (401/403, CSRF, roles, login, logout), real browser-style CSRF flow, static UI and CSP, Flyway and constraints, immutability, full billing lifecycle with exact amounts |
+
+H2 is not MySQL: collation, lock timeouts and trigger support differ, so the MySQL-only triggers are not covered by the suite.
+
+## Project structure
+
 ```
-PowerShell: `$env:SPRING_PROFILES_ACTIVE="mysql"; java -jar target\credit-card-billing-system-1.0.0.jar`
+.
+├── pom.xml
+├── .env.example
+├── docs/screenshots/                 # README images
+└── src
+    ├── main
+    │   ├── java/com/example/ccbilling
+    │   │   ├── billing/              # pure calculation logic (no Spring)
+    │   │   ├── config/               # security, clock, password encoder, admin bootstrap
+    │   │   ├── domain/               # JPA entities and enums
+    │   │   ├── dto/                  # request/response records
+    │   │   ├── exception/            # API exceptions
+    │   │   ├── repository/           # Spring Data repositories
+    │   │   ├── security/             # principal, user details, JSON 401/403 handlers
+    │   │   ├── service/              # business logic, transactions, audit
+    │   │   └── web/                  # REST controllers, global error handler
+    │   └── resources
+    │       ├── application*.properties
+    │       ├── db/migration/         # V1 schema, V2 seed data
+    │       ├── db/migration-mysql/   # V100 append-only triggers (MySQL only)
+    │       └── static/               # web UI: index.html, css/, js/
+    └── test/java/com/example/ccbilling
+        ├── billing/ service/ config/ integration/ support/
+```
 
-## 15. Troubleshooting
+## Troubleshooting
+
 | Symptom | Fix |
 |---|---|
-| `release version 17 not supported` / `UnsupportedClassVersionError` | Use JDK 17+ (`JAVA_HOME`). |
-| `Port 8080 was already in use` | `SERVER_PORT=8081` (PowerShell: `$env:SERVER_PORT=8081`). |
-| `Access denied for user` / `Communications link failure` (MySQL) | Check MySQL is running, `DB_USERNAME`/`DB_PASSWORD`, and that the env vars are exported in the same shell. |
-| `Public Key Retrieval is not allowed` | Keep `allowPublicKeyRetrieval=true` in `DB_URL` for local MySQL 8 (or configure TLS). |
-| `Migration checksum mismatch` | An applied migration was edited. Restore it and add a new `V3__…` file; for a throw-away dev DB drop and recreate the schema. |
-| `Schema-validation: wrong column type / missing column` | Entity and migration drifted; fix the migration (new version) or the mapping. |
-| MySQL error 1419 creating triggers | Grant `SUPER` to the migration user or `SET GLOBAL log_bin_trust_function_creators = 1;`, or skip with `FLYWAY_LOCATIONS=classpath:db/migration`. |
-| `403 FORBIDDEN` on POST/PUT/PATCH | Missing/old CSRF token or session cookie: call `GET /api/auth/csrf` with the same cookie jar and send `X-CSRF-TOKEN`. |
-| `401` after some time | Session expired (30 min) – log in again (the UI returns you to the sign-in page). |
-| Blank page or unstyled UI | Hard-refresh (Cmd/Ctrl+Shift+R) and check the browser console. The CSP blocks inline scripts/styles by design; do not add them. |
-| UI changes not visible after editing `static/` files | Restart `mvn spring-boot:run` (or rebuild), then hard-refresh. |
-| `Initial administrator … password must be at least 12 characters` | Use a longer `BOOTSTRAP_ADMIN_PASSWORD`. |
-| H2 admin password not shown | It is printed once at first start only; set `BOOTSTRAP_ADMIN_*` explicitly. |
-| `409 CONFLICT` with `CONCURRENT_MODIFICATION` | Two writers collided; retry the request (payments are safe to retry with the same `Idempotency-Key`). |
+| `release version 17 not supported` | Use JDK 17+ and check `JAVA_HOME` (`java -version`). |
+| `Port 8080 was already in use` | `SERVER_PORT=8081`. |
+| Mockito or build errors on very new JDKs | Use JDK 21 (a Spring Boot 3.3 release is not built for the very latest JDKs). |
+| `403` on POST/PUT/PATCH | Missing or old CSRF token or cookie: fetch `/api/auth/csrf` with the same session. |
+| `401` after a while | Session expired (30 min); sign in again. |
+| Admin password not shown | It prints once at first start; set `BOOTSTRAP_ADMIN_*` explicitly. |
+| `Migration checksum mismatch` | An applied migration was edited; restore it and add a new `V3__...sql` instead. |
+| MySQL `Access denied` / connection errors | Check MySQL is running and the `DB_*` variables are exported in the same shell. |
+| MySQL error 1419 creating triggers | Grant `SUPER` / set `log_bin_trust_function_creators=1`, or skip with `FLYWAY_LOCATIONS=classpath:db/migration`. |
+| Blank or unstyled UI | Hard-refresh and check the browser console; the CSP blocks inline scripts/styles by design. |
 
-## 16. Push to GitHub
-Create an empty repository on GitHub yourself, copy its URL and replace the placeholder. Nothing in this project pushes or uses your credentials.
-```bash
-git init
-git add .
-git commit -m "Initial commit: Credit Card Billing and Statement Management System"
-git branch -M main
-git remote add origin <YOUR_GITHUB_REPOSITORY_URL>
-git push -u origin main
-```
-`.gitignore` already excludes `target/`, IDE files, `.env*` (except `.env.example`), local `data/`/`*.mv.db` files and logs. No LICENSE file is included; add one of your choice before publishing if you want others to reuse the code.
+## Limitations and roadmap
 
-## 17. Design notes and limitations
-* **Frontend**: static files under `src/main/resources/static` (`index.html`, `css/app.css`, `js/*.js`), served by Spring Boot and permitted without login in `SecurityConfig`; everything under `/api` stays protected. There is no bundler: ES modules load directly in the browser. Because the UI is same-origin, CORS stays disabled.
-* **Layers**: controllers (thin, DTOs only) → services (rules, transactions, authorization, audit) → repositories → entities. Constructor injection everywhere; entities are never serialized.
-* **Concurrency**: card rows are locked (`SELECT … FOR UPDATE`) for entry posting and statement generation; statement rows for payments, reversals and late fees; unique constraints back every duplicate-protection rule (statement per card/period, idempotency key per customer, late fee per statement/event, entry reference per card). Optimistic `@Version` columns guard ordinary updates.
-* **Transactions**: payment row + allocation + statement balance + audit row commit or roll back together (audit writes join the caller's transaction).
-* **Append-only**: audit log, late-fee ledger and payment allocations have no update/delete methods in their repositories, are `@Immutable` in Hibernate and (MySQL) protected by triggers and optional grants. Limitations: on H2 there are no triggers; `JpaSpecificationExecutor` still declares `delete(Specification)` (never called); a database administrator can always alter data.
-* **Statement snapshot columns** are written once (`updatable=false`) but the database itself does not forbid updates to them.
-* **Known simplifications**: manual late-fee assessment, no overpayment/credit refunds, single currency, no multi-statement allocation, `Idempotency-Key` required only for payments, no rate limiting or account lockout, HTTP only unless you add TLS in front.
+Known simplifications:
+- Statements and late fees are triggered manually by an administrator (no scheduler)
+- No overpayment or credit refunds, no late-fee waiver, single currency
+- No rate limiting, account lockout, password reset, email verification or MFA
+- Sessions are held in memory (restart logs everyone out; not multi-instance ready)
+- No notifications, statement PDFs, or admin editing of customer details
 
-## Verification status
-| Check | Result |
-|---|---|
-| Backend: `mvn clean test` on the 143 backend tests (run by the project owner on JDK 21 / Maven 3.10) | 142 passed; the one failure was a quoted-identifier bug in a test query (`flyway_schema_history`), fixed in this version |
-| Backend: application start-up with the H2 profile (Flyway, Hibernate `validate`, Spring Security, Tomcat) | Started successfully on the owner's machine (log reviewed) |
-| Backend changes made **after** that run (static-resource rules + CSP in `SecurityConfig`, 5 new tests) | **Not run yet.** They compile at syntax level only; run `mvn clean test` |
-| Frontend: 7 JavaScript modules loaded in a simulated browser (jsdom, Node 22) against an in-memory fake of the API; **30 behavioural checks** (sign-in/registration, every customer and administrator page, statement and payment dialogs, `Idempotency-Key`, CSRF refresh/retry, role redirects, error display, expired session, no HTML injection) | **30 / 30 passed** after fixing two real bugs it found (a wrong import and a use-before-define) |
-| Frontend in a real browser against the real server | **Not run.** Do the first-run walkthrough in [Web UI](#web-ui) and report anything odd |
-| MySQL profile and the `V100` triggers | Not run / untested |
+Possible next steps:
+- [ ] Dockerfile and a deployed demo with managed MySQL, HTTPS and forwarded-headers configuration
+- [ ] Scheduled statement generation and late-fee assessment
+- [ ] Verify the MySQL profile and triggers (for example with Testcontainers)
+- [ ] Statement PDF export, due-date reminders
+- [ ] Rate limiting and account lockout; shared session store
 
-The simulated-browser test lives outside the project (it needs Node), so the ZIP stays Java/Maven only.
+## Project status
+
+- 148 automated tests pass locally (JDK 21, Maven 3.10, in-memory H2).
+- The application starts and serves the web UI on the default H2 profile.
+- The UI's behavior was also checked with a scripted simulated-browser run during development; that script is not part of this repository.
+- **Not yet verified:** the MySQL profile and the MySQL-only triggers, and any live deployment.
+
+## Author
+
+Built by **Om Kumar Singh**: [github.com/omkumars31](https://github.com/omkumars31)
+
+No license has been specified for this repository.
